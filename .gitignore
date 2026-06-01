@@ -1,0 +1,20 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment & local data
+.env
+data/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp

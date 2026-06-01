@@ -3,25 +3,152 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+import terminal
 from config import get_settings
 from graph import build_graph
 
 
+def _pct(value) -> str:
+    try:
+        return f"{round(float(value) * 100)}%"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _extract_predictions(messages) -> list[dict]:
+    """Pull structured predictions (teams, score, winner, probs, points) from tool outputs."""
+    preds: list[dict] = []
+    seen: set[tuple] = set()
+
+    def add(pred: dict) -> None:
+        key = (pred["home"], pred["away"], pred["score"])
+        if pred["home"] and pred["away"] and pred["score"] and key not in seen:
+            seen.add(key)
+            preds.append(pred)
+
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        try:
+            data = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        bet = data.get("recommended_bet")
+        if isinstance(bet, dict):
+            model = data.get("model_prediction", {})
+            probs = bet.get("result_probabilities", {})
+            add(
+                {
+                    "home": str(model.get("home_team", "")),
+                    "away": str(model.get("away_team", "")),
+                    "score": str(bet.get("score", "")),
+                    "winner": bet.get("winner"),
+                    "probs": probs,
+                    "expected_points": bet.get("expected_points"),
+                    "max_points": bet.get("max_points"),
+                    "stage": bet.get("stage") or data.get("stage"),
+                }
+            )
+        for pick in data.get("picks", []) or []:
+            if not isinstance(pick, dict):
+                continue
+            parts = re.split(r"\s+vs\.?\s+", str(pick.get("match", "")), maxsplit=1)
+            if len(parts) == 2:
+                add(
+                    {
+                        "home": parts[0].strip(),
+                        "away": parts[1].strip(),
+                        "score": str(pick.get("score", "")),
+                        "winner": pick.get("winner"),
+                        "probs": {},
+                        "expected_points": pick.get("expected_points"),
+                        "max_points": data.get("max_points"),
+                        "stage": data.get("stage"),
+                    }
+                )
+    return preds
+
+
+def _message_text(message) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        content = "\n".join(parts)
+    return str(content).strip()
+
+
+def format_for_terminal(text: str) -> str:
+    """Strip common markdown so CLI output reads cleanly in a terminal."""
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    text = text.replace("•", "-")
+    return text.strip()
+
+
+def print_terminal(message, predictions=None) -> None:
+    text = format_for_terminal(_message_text(message))
+    predictions = predictions or []
+    print()
+
+    for pred in predictions:
+        for line in terminal.banner(pred["home"], pred["away"], pred["score"]):
+            print(line)
+        # Show key stats deterministically (single match only, to stay compact).
+        if len(predictions) == 1:
+            if pred.get("winner"):
+                print(terminal.stat("Winner", pred["winner"], "green"))
+            probs = pred.get("probs") or {}
+            if probs:
+                value = (
+                    f"H {_pct(probs.get('home_win'))} / "
+                    f"D {_pct(probs.get('draw'))} / "
+                    f"A {_pct(probs.get('away_win'))}"
+                )
+                print(terminal.stat("Win prob", value, "magenta"))
+            if pred.get("expected_points") is not None:
+                stage = f" ({pred['stage']})" if pred.get("stage") else ""
+                value = f"{pred['expected_points']}/{pred.get('max_points', '?')}{stage}"
+                print(terminal.stat("Expected points", value, "yellow"))
+        elif pred.get("expected_points") is not None:
+            print(terminal.stat("Expected points", str(pred["expected_points"]), "yellow"))
+
+    if text:
+        print()
+        print(terminal.render(text, skip_banner=bool(predictions)))
+
+
 def print_stream(stream) -> None:
+    tool_messages: list = []
     for step in stream:
         for node_name, update in step.items():
             if "messages" not in update:
                 continue
             message = update["messages"][-1]
-            print(f"\n--- {node_name} ---")
-            if hasattr(message, "pretty_print"):
-                message.pretty_print()
-            else:
-                print(message)
+            if node_name == "tools":
+                tool_messages.append(message)
+            elif (
+                node_name == "agent"
+                and isinstance(message, AIMessage)
+                and not getattr(message, "tool_calls", None)
+            ):
+                print_terminal(message, _extract_predictions(tool_messages))
 
 
 def run_query(query: str, *, stream: bool = True) -> None:
@@ -40,7 +167,9 @@ def run_query(query: str, *, stream: bool = True) -> None:
         )
     else:
         result = app.invoke(input_state, config=config)
-        result["messages"][-1].pretty_print()
+        print_terminal(
+            result["messages"][-1], _extract_predictions(result["messages"])
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,34 +1,52 @@
-"""Static football knowledge used by agent tools (expand or replace with live APIs later)."""
+"""Static football knowledge used by agent tools"""
 
 
 from __future__ import annotations
 
 
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from scoring import optimize_scoreline
+
+FormResult = Literal["W", "D", "L"]
 
 
+class TeamProfile(BaseModel):
+    """National team stats used by the match prediction heuristic."""
 
-@dataclass(frozen=True)
-class TeamProfile:
-    name: str
-    confederation: str
-    fifa_rank: int
-    form: tuple[str, ...]  # last 5: W, D, or L
-    avg_goals_scored: float
-    avg_goals_conceded: float
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1)
+    confederation: str = Field(min_length=1)
+    fifa_rank: int = Field(ge=1, le=300)
+    form: tuple[FormResult, FormResult, FormResult, FormResult, FormResult]
+    avg_goals_scored: float = Field(ge=0.0)
+    avg_goals_conceded: float = Field(ge=0.0)
     notes: str = ""
 
 
+class HeadToHeadRecord(BaseModel):
+    """Historical meetings between two national teams."""
 
-@dataclass(frozen=True)
-class HeadToHeadRecord:
-    matches_played: int
-    home_team_wins: int
-    away_team_wins: int
-    draws: int
-    last_meeting: str
-    summary: str
+    model_config = ConfigDict(frozen=True)
+
+    matches_played: int = Field(ge=0)
+    home_team_wins: int = Field(ge=0)
+    away_team_wins: int = Field(ge=0)
+    draws: int = Field(ge=0)
+    last_meeting: str = ""
+    summary: str = ""
+
+    @model_validator(mode="after")
+    def results_do_not_exceed_matches(self) -> HeadToHeadRecord:
+        total = self.home_team_wins + self.away_team_wins + self.draws
+        if total > self.matches_played:
+            raise ValueError(
+                "home_team_wins + away_team_wins + draws cannot exceed matches_played"
+            )
+        return self
 
 
 TEAM_ALIASES: dict[str, str] = {
@@ -58,11 +76,14 @@ TEAM_ALIASES: dict[str, str] = {
     "canada": "Canada",
     "south korea": "South Korea",
     "korea": "South Korea",
+    "korea republic": "South Korea",
+    "kr": "South Korea",
     "kor": "South Korea",
     "czech republic": "Czech Republic",
     "czechia": "Czech Republic",
     "bosnia": "Bosnia and Herzegovina",
     "bosnia and herzegovina": "Bosnia and Herzegovina",
+    "bosnia-herzegovina": "Bosnia and Herzegovina",
     "bih": "Bosnia and Herzegovina",
     "qatar": "Qatar",
     "switzerland": "Switzerland",
@@ -89,10 +110,13 @@ TEAM_ALIASES: dict[str, str] = {
     "egypt": "Egypt",
     "egy": "Egypt",
     "iran": "Iran",
+    "ir iran": "Iran",
     "irn": "Iran",
     "new zealand": "New Zealand",
     "nzl": "New Zealand",
     "cape verde": "Cape Verde",
+    "cabo verde": "Cape Verde",
+    "cvi": "Cape Verde",
     "cpv": "Cape Verde",
     "saudi arabia": "Saudi Arabia",
     "ksa": "Saudi Arabia",
@@ -679,13 +703,48 @@ def _rank_strength(rank: int) -> float:
     return max(0.2, 1.0 - (rank - 1) / 200.0)
 
 
+def _apply_recent(team: TeamProfile, recent: list[dict[str, Any]] | None) -> TeamProfile:
+    """Blend a team's static profile with its actual recent (in-tournament) results.
 
-def predict_match(home_team: str, away_team: str) -> dict[str, Any]:
-    """Heuristic match prediction from rankings, form, and optional H2H."""
+    recent: list of {goals_for, goals_against, result} ordered most-recent-first.
+    More matches give the live data more weight (capped), keeping early predictions stable.
+    """
+    if not recent:
+        return team
+    n = len(recent)
+    gf = sum(r.get("goals_for", 0) for r in recent) / n
+    ga = sum(r.get("goals_against", 0) for r in recent) / n
+    weight = min(0.6, 0.2 * n)
+    new_scored = round((1 - weight) * team.avg_goals_scored + weight * gf, 3)
+    new_conceded = round((1 - weight) * team.avg_goals_conceded + weight * ga, 3)
+    recent_form = [r["result"] for r in recent if r.get("result") in ("W", "D", "L")]
+    combined = (recent_form + list(team.form))[:5]
+    while len(combined) < 5:
+        combined.append("D")
+    return team.model_copy(
+        update={
+            "avg_goals_scored": new_scored,
+            "avg_goals_conceded": new_conceded,
+            "form": tuple(combined),
+        }
+    )
+
+
+def predict_match(
+    home_team: str,
+    away_team: str,
+    home_recent: list[dict[str, Any]] | None = None,
+    away_recent: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Heuristic match prediction from rankings, form, and optional H2H.
+
+    home_recent/away_recent optionally provide each team's actual in-tournament results
+    (most recent first) to update form and goal averages.
+    """
     home_name = resolve_team(home_team)
     away_name = resolve_team(away_team)
-    home = TEAMS[home_name]
-    away = TEAMS[away_name]
+    home = _apply_recent(TEAMS[home_name], home_recent)
+    away = _apply_recent(TEAMS[away_name], away_recent)
 
 
     home_strength = _rank_strength(home.fifa_rank) * 0.55 + _form_strength(home) * 0.45
@@ -713,19 +772,17 @@ def predict_match(home_team: str, away_team: str) -> dict[str, Any]:
 
     home_xg = home.avg_goals_scored * (away.avg_goals_conceded / 1.2) * (1 + HOME_ADVANTAGE)
     away_xg = away.avg_goals_scored * (home.avg_goals_conceded / 1.2)
-    home_goals = max(0, round(home_xg + (home_win_p - away_win_p) * 0.8))
-    away_goals = max(0, round(away_xg + (away_win_p - home_win_p) * 0.8))
 
+    probabilities = {
+        "home_win": round(home_win_p, 3),
+        "draw": round(draw_p, 3),
+        "away_win": round(away_win_p, 3),
+    }
 
-    if home_goals == away_goals and home_win_p > away_win_p + 0.08:
-        home_goals += 1
-    elif home_goals == away_goals and away_win_p > home_win_p + 0.08:
-        away_goals += 1
-
-
-    if home_goals > away_goals:
+    optimal = optimize_scoreline(home_xg, away_xg, probabilities)
+    if optimal["result"] == "home_win":
         winner = home_name
-    elif away_goals > home_goals:
+    elif optimal["result"] == "away_win":
         winner = away_name
     else:
         winner = "Draw"
@@ -740,6 +797,11 @@ def predict_match(home_team: str, away_team: str) -> dict[str, Any]:
         f"Recent form: {home_name} {''.join(home.form)} | {away_name} {''.join(away.form)}",
         f"Home advantage applied for {home_name}",
     ]
+    if home_recent or away_recent:
+        factors.append(
+            f"Adjusted for in-tournament results "
+            f"({home_name}: {len(home_recent or [])}, {away_name}: {len(away_recent or [])} match(es))"
+        )
     if h2h.get("matches_played"):
         factors.append(h2h["summary"])
 
@@ -747,13 +809,11 @@ def predict_match(home_team: str, away_team: str) -> dict[str, Any]:
     return {
         "home_team": home_name,
         "away_team": away_name,
-        "predicted_score": f"{home_goals}-{away_goals}",
+        "predicted_score": optimal["predicted_score"],
         "likely_winner": winner,
-        "probabilities": {
-            "home_win": round(home_win_p, 3),
-            "draw": round(draw_p, 3),
-            "away_win": round(away_win_p, 3),
-        },
+        "probabilities": probabilities,
+        "expected_xg": {"home": round(home_xg, 2), "away": round(away_xg, 2)},
+        "expected_points": optimal["expected_points"],
         "confidence": confidence,
         "key_factors": factors,
         "disclaimer": "Statistical estimate only — not a guarantee of the actual result.",

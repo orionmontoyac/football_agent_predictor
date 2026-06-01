@@ -2,6 +2,7 @@ import json
 
 from langchain_core.tools import BaseTool, tool
 
+import store
 from config import get_settings
 from football_data import (
     TeamNotFoundError,
@@ -12,6 +13,27 @@ from football_data import (
     resolve_team,
 )
 from polymarket import PolymarketClient, PolymarketError, blend_probabilities
+from scoring import infer_xg_from_market, optimize_scoreline
+
+
+def _canonical(team_name: str) -> str:
+    try:
+        return resolve_team(team_name)
+    except TeamNotFoundError:
+        return team_name
+
+
+def _recent_context(team_name: str) -> list[dict]:
+    """Recent in-tournament results for a team (most recent first), for prediction context."""
+    results = store.get_team_results(_canonical(team_name))
+    return [
+        {
+            "goals_for": r["goals_for"],
+            "goals_against": r["goals_against"],
+            "result": r["result"],
+        }
+        for r in results
+    ]
 
 
 @tool
@@ -61,7 +83,11 @@ def get_polymarket_odds(home_team: str, away_team: str, match_date: str = "") ->
 
 @tool
 def list_world_cup_fixtures() -> str:
-    """List upcoming World Cup fixtures tracked on Polymarket (teams, date, slug)."""
+    """List the World Cup match SCHEDULE only (teams, date, slug). Does NOT make predictions.
+
+    Only use this to show the calendar. To predict/pick results, use predict_all_fixtures
+    or predict_match_result instead.
+    """
     settings = get_settings()
     if not settings.polymarket_enabled:
         return json.dumps({"error": "Polymarket enrichment is disabled in settings."})
@@ -73,43 +99,259 @@ def list_world_cup_fixtures() -> str:
 
 
 @tool
-def predict_match_result(home_team: str, away_team: str, match_date: str = "") -> str:
-    """Predict the likely result of a football match.
+def predict_match_result(
+    home_team: str, away_team: str, match_date: str = "", stage: str = "group"
+) -> str:
+    """Predict the points-maximizing scoreline for a football match.
 
     home_team is the side playing at home (first name in 'X vs Y' queries).
     away_team is the visiting side. match_date is an optional ISO date (YYYY-MM-DD).
+    stage is 'group' (primera ronda) or 'knockout' (fases eliminatorias) for the points scale.
 
-    Combines a statistical model (FIFA rank, recent form, head-to-head) with live
-    Polymarket odds when available, and returns a blended forecast plus both sources.
+    Picks the scoreline that maximizes expected points under the contest rules, using a
+    statistical model (FIFA rank, form, H2H) blended with live Polymarket odds when available.
+    The recommended_bet is the score to submit.
     """
     settings = get_settings()
+    stage = stage if stage in ("group", "knockout") else "group"
+    home_recent = _recent_context(home_team)
+    away_recent = _recent_context(away_team)
     try:
-        model = predict_match(home_team, away_team)
+        model = predict_match(home_team, away_team, home_recent, away_recent)
     except TeamNotFoundError as exc:
         return json.dumps({"error": str(exc), "known_teams": list_teams()})
 
-    result: dict = {"model_prediction": model}
+    xg = model["expected_xg"]
+    final_probs = model["probabilities"]
+    result: dict = {"stage": stage, "model_prediction": model}
+    slug = None
+    event_date = match_date or None
 
     if settings.polymarket_enabled:
         try:
             client = PolymarketClient(settings)
             odds = client.find_match(home_team, away_team, match_date or None)
             market = odds.to_dict()
-            result["polymarket"] = market
-            result["blended_probabilities"] = blend_probabilities(
+            slug = odds.slug
+            event_date = odds.event_date or event_date
+            final_probs = blend_probabilities(
                 model["probabilities"],
                 market["implied_probabilities"],
                 settings.polymarket_market_weight,
             )
-            result["note"] = (
-                "blended_probabilities mixes the statistical model with live market "
-                f"odds (market weight {settings.polymarket_market_weight})."
-            )
+            result["polymarket"] = market
+            result["blended_probabilities"] = final_probs
         except PolymarketError as exc:
             result["polymarket_error"] = str(exc)
-            result["note"] = "Live market odds unavailable; using model prediction only."
 
+    optimal = optimize_scoreline(xg["home"], xg["away"], final_probs)
+    winner = (
+        model["home_team"]
+        if optimal["result"] == "home_win"
+        else model["away_team"]
+        if optimal["result"] == "away_win"
+        else "Draw"
+    )
+    result["recommended_bet"] = {
+        "score": optimal["predicted_score"],
+        "winner": winner,
+        "stage": stage,
+        "expected_points": optimal["expected_points"][stage],
+        "max_points": optimal["max_points"][stage],
+        "result_probabilities": optimal["result_probabilities"],
+    }
+    if home_recent or away_recent:
+        result["used_recent_results"] = {
+            model["home_team"]: home_recent,
+            model["away_team"]: away_recent,
+        }
+
+    store.save_prediction(
+        model["home_team"],
+        model["away_team"],
+        optimal["home_goals"],
+        optimal["away_goals"],
+        stage=stage,
+        event_date=event_date,
+        slug=slug,
+        expected_points=optimal["expected_points"][stage],
+        source="model+market" if "polymarket" in result else "model",
+    )
+    result["note"] = (
+        "recommended_bet maximizes expected points and was saved. It blends the model "
+        "(adjusted for past tournament results) with live market odds."
+    )
     return json.dumps(result, indent=2)
+
+
+def _recommended_bet(
+    home_team: str,
+    away_team: str,
+    market_probs: dict[str, float] | None,
+    settings,
+    stage: str,
+) -> dict:
+    """Compute the points-maximizing bet from the model and/or market odds."""
+    probs = market_probs
+    source = "market"
+    home_recent = _recent_context(home_team)
+    away_recent = _recent_context(away_team)
+    try:
+        model = predict_match(home_team, away_team, home_recent, away_recent)
+        xg = model["expected_xg"]
+        if market_probs:
+            probs = blend_probabilities(
+                model["probabilities"], market_probs, settings.polymarket_market_weight
+            )
+            source = "model+market"
+        else:
+            probs = model["probabilities"]
+            source = "model"
+    except TeamNotFoundError:
+        if not market_probs:
+            raise
+        xg = infer_xg_from_market(market_probs)
+
+    optimal = optimize_scoreline(xg["home"], xg["away"], probs)
+    winner = (
+        home_team
+        if optimal["result"] == "home_win"
+        else away_team
+        if optimal["result"] == "away_win"
+        else "Draw"
+    )
+    return {
+        "match": f"{home_team} vs {away_team}",
+        "home_goals": optimal["home_goals"],
+        "away_goals": optimal["away_goals"],
+        "score": optimal["predicted_score"],
+        "winner": winner,
+        "expected_points": optimal["expected_points"][stage],
+        "max_points": optimal["max_points"][stage],
+        "source": source,
+        "used_recent": bool(home_recent or away_recent),
+    }
+
+
+@tool
+def predict_all_fixtures(stage: str = "group", match_date: str = "", limit: int = 30) -> str:
+    """Make PICKS/PREDICTIONS for many World Cup matches at once (e.g. 'all matches', 'today's games').
+
+    This is the tool to fill the polla. Returns the points-maximizing score for each fixture.
+    stage is 'group' or 'knockout'. match_date filters to one ISO date (YYYY-MM-DD) — pass it
+    whenever the user mentions a specific day. limit caps results (default 30). Uses the
+    90-minute result only (draws allowed in knockout).
+    """
+    settings = get_settings()
+    stage = stage if stage in ("group", "knockout") else "group"
+    if not settings.polymarket_enabled:
+        return json.dumps({"error": "Polymarket enrichment is disabled in settings."})
+    try:
+        client = PolymarketClient(settings)
+        odds_list = client.all_match_odds(match_date=match_date or None)
+    except PolymarketError as exc:
+        return json.dumps({"error": str(exc)})
+
+    picks = []
+    for odds in odds_list[: max(1, limit)]:
+        market = odds.to_dict()["implied_probabilities"]
+        try:
+            bet = _recommended_bet(odds.home_team, odds.away_team, market, settings, stage)
+        except TeamNotFoundError:
+            continue
+        store.save_prediction(
+            _canonical(odds.home_team),
+            _canonical(odds.away_team),
+            bet["home_goals"],
+            bet["away_goals"],
+            stage=stage,
+            event_date=odds.event_date,
+            slug=odds.slug,
+            expected_points=bet["expected_points"],
+            source=bet["source"],
+        )
+        bet["match"] = odds.title
+        bet["event_date"] = odds.event_date
+        picks.append(
+            {
+                "match": odds.title,
+                "event_date": odds.event_date,
+                "score": bet["score"],
+                "winner": bet["winner"],
+                "expected_points": bet["expected_points"],
+                "source": bet["source"],
+            }
+        )
+
+    total_ep = round(sum(p["expected_points"] for p in picks), 2)
+    return json.dumps(
+        {
+            "stage": stage,
+            "fixtures_returned": len(picks),
+            "projected_total_points": total_ep,
+            "picks": picks,
+        },
+        indent=2,
+    )
+
+
+@tool
+def record_match_result(
+    home_team: str,
+    away_team: str,
+    home_goals: int,
+    away_goals: int,
+    match_date: str = "",
+    stage: str = "group",
+) -> str:
+    """Save the REAL 90-minute result of a played World Cup match.
+
+    Stores the actual score so it becomes context for future predictions and scores the
+    points earned vs the saved prediction. home_team is the side that played at home.
+    """
+    stage = stage if stage in ("group", "knockout") else "group"
+    settings = get_settings()
+    slug = None
+    event_date = match_date or None
+    if settings.polymarket_enabled:
+        try:
+            odds = PolymarketClient(settings).find_match(
+                home_team, away_team, match_date or None
+            )
+            slug = odds.slug
+            event_date = odds.event_date or event_date
+        except PolymarketError:
+            pass
+    record = store.record_result(
+        _canonical(home_team),
+        _canonical(away_team),
+        int(home_goals),
+        int(away_goals),
+        stage=stage,
+        event_date=event_date,
+        slug=slug,
+    )
+    return json.dumps(record, indent=2, ensure_ascii=False)
+
+
+@tool
+def get_team_recent_results(team_name: str) -> str:
+    """Show a team's actual results so far in this World Cup (most recent first).
+
+    Use this for context before predicting a team's next match.
+    """
+    results = store.get_team_results(_canonical(team_name))
+    return json.dumps(
+        {"team": _canonical(team_name), "matches_played": len(results), "results": results},
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+@tool
+def get_points_summary() -> str:
+    """Show total points earned so far and prediction accuracy across recorded matches."""
+    return json.dumps(store.summary(), indent=2)
 
 
 @tool
@@ -124,5 +366,9 @@ TOOLS: list[BaseTool] = [
     get_polymarket_odds,
     list_world_cup_fixtures,
     predict_match_result,
+    predict_all_fixtures,
+    record_match_result,
+    get_team_recent_results,
+    get_points_summary,
     list_supported_teams,
 ]

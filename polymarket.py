@@ -110,6 +110,13 @@ def _market_yes_price(market: dict[str, Any]) -> float | None:
     return None
 
 
+def _is_fulltime_match(event: dict[str, Any]) -> bool:
+    """True only for the full-time 90-minute result (moneyline) event, not props."""
+    return any(
+        m.get("sportsMarketType") == "moneyline" for m in event.get("markets", [])
+    )
+
+
 def _parse_event(event: dict[str, Any]) -> MatchOdds:
     teams = event.get("teams") or []
     home_name = away_name = None
@@ -126,8 +133,12 @@ def _parse_event(event: dict[str, Any]) -> MatchOdds:
             home_name = home_name or parts[0].strip()
             away_name = away_name or parts[1].strip()
 
+    markets = event.get("markets", [])
+    moneyline = [m for m in markets if m.get("sportsMarketType") == "moneyline"]
+    markets = moneyline or markets
+
     home_p = draw_p = away_p = None
-    for market in event.get("markets", []):
+    for market in markets:
         group = (market.get("groupItemTitle") or "").strip()
         price = _market_yes_price(market)
         if price is None:
@@ -232,10 +243,28 @@ class PolymarketClient:
         _fixtures_cache = (now, events)
         return events
 
+    def all_match_odds(
+        self, *, match_date: str | None = None
+    ) -> list[MatchOdds]:
+        """Parsed odds for every fixture (optionally filtered by ISO date)."""
+        results: list[MatchOdds] = []
+        for event in self.fetch_world_cup_fixtures():
+            if match_date and event.get("eventDate") != match_date:
+                continue
+            if not _is_fulltime_match(event):
+                continue
+            try:
+                results.append(_parse_event(event))
+            except PolymarketError:
+                continue
+        return results
+
     def list_fixtures(self) -> list[dict[str, Any]]:
         """Lightweight summary of upcoming fixtures (date, teams, slug)."""
         fixtures = []
         for event in self.fetch_world_cup_fixtures():
+            if not _is_fulltime_match(event):
+                continue
             fixtures.append(
                 {
                     "match": event.get("title"),
@@ -257,6 +286,8 @@ class PolymarketClient:
         wanted = {home_team.strip().lower(), away_team.strip().lower()}
         best: dict[str, Any] | None = None
         for event in self.fetch_world_cup_fixtures():
+            if not _is_fulltime_match(event):
+                continue
             teams = {
                 str(t.get("name", "")).strip().lower()
                 for t in (event.get("teams") or [])
