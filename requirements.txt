@@ -3,3 +3,4 @@ langchain-ollama
 langgraph
 pydantic-settings
 python-dotenv
+httpx

@@ -1,7 +1,6 @@
 from functools import lru_cache
 from typing import Any, Literal
 
-from langchain_ollama import ChatOllama
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -50,8 +49,52 @@ class Settings(BaseSettings):
 
     # --- Agent / prompts ---
     agent_system_prompt: str = Field(
-        default="You are a helpful assistant. Please respond to the user's request.",
+        default=(
+            "You are an expert football (soccer) analyst specializing in national-team match predictions.\n"
+            "When the user asks about a fixture (e.g. 'Mexico vs South Africa'):\n"
+            "1. Treat the first team named as the home side unless they say otherwise.\n"
+            "2. Call lookup_team for each team to check form and FIFA ranking.\n"
+            "3. Call get_match_head_to_head for historical context.\n"
+            "4. Call predict_match_result with home_team and away_team. It returns a statistical\n"
+            "   model prediction, live Polymarket odds (when available), and a blended forecast.\n"
+            "5. Compare the model and the market: if they disagree, briefly explain why.\n"
+            "6. Answer in clear, friendly prose: predicted score, likely winner, confidence, market\n"
+            "   probabilities, and 2-3 key reasons.\n"
+            "If a team is unknown, call list_supported_teams and tell the user. To browse upcoming\n"
+            "matches, use list_world_cup_fixtures. For raw market odds only, use get_polymarket_odds.\n"
+            "Always note that predictions are statistical/market estimates, not guarantees."
+        ),
         description="System message prepended on each model call.",
+    )
+
+    # --- Polymarket (live odds enrichment) ---
+    polymarket_enabled: bool = Field(
+        default=True,
+        description="Enable live odds enrichment from the Polymarket Gamma API.",
+    )
+    polymarket_base_url: str = Field(
+        default="https://gamma-api.polymarket.com",
+        description="Polymarket Gamma API base URL (public, no auth).",
+    )
+    polymarket_world_cup_series_id: str = Field(
+        default="11433",
+        description="Gamma series id that groups all World Cup match events.",
+    )
+    polymarket_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=0,
+        description="How long to cache the fixtures list before refetching.",
+    )
+    polymarket_timeout_seconds: float = Field(
+        default=15.0,
+        gt=0,
+        description="HTTP timeout for Polymarket requests.",
+    )
+    polymarket_market_weight: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Weight given to market odds when blending with the heuristic model.",
     )
 
     # --- LangGraph runtime ---
@@ -69,31 +112,6 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         default="INFO",
     )
-
-    def ollama_kwargs(self) -> dict[str, Any]:
-        """Keyword arguments for ChatOllama, omitting unset optional fields."""
-        kwargs: dict[str, Any] = {
-            "model": self.ollama_model,
-            "validate_model_on_init": self.ollama_validate_model_on_init,
-        }
-        if self.ollama_base_url is not None:
-            kwargs["base_url"] = self.ollama_base_url
-        if self.ollama_temperature is not None:
-            kwargs["temperature"] = self.ollama_temperature
-        if self.ollama_num_predict is not None:
-            kwargs["num_predict"] = self.ollama_num_predict
-        if self.ollama_reasoning is not None:
-            kwargs["reasoning"] = self.ollama_reasoning
-        if self.ollama_format is not None:
-            kwargs["format"] = self.ollama_format
-        return kwargs
-
-    def create_chat_model(self, *, bind_tools: list | None = None) -> ChatOllama:
-        """Build a ChatOllama instance from current settings."""
-        model = ChatOllama(**self.ollama_kwargs())
-        if bind_tools:
-            return model.bind_tools(bind_tools)
-        return model
 
     def langgraph_invoke_config(self) -> dict[str, Any]:
         """RunnableConfig-style dict for graph.invoke / graph.stream."""
