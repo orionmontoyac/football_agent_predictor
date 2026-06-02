@@ -41,6 +41,11 @@ def lookup_team(team_name: str) -> str:
     """Look up a national team's FIFA ranking, recent form, and goal averages.
 
     Use this before predicting a match to understand each side's strength.
+
+    Args:
+        team_name: The name of the team to lookup.
+    Returns:
+        A JSON string with the team's profile.
     """
     try:
         return json.dumps(get_team_profile(team_name), indent=2)
@@ -53,6 +58,11 @@ def get_match_head_to_head(team_a: str, team_b: str) -> str:
     """Get head-to-head history between two national teams.
 
     team_a and team_b are the two sides (order does not matter).
+    Args:
+        team_a: The name of the first team.
+        team_b: The name of the second team.
+    Returns:
+        A JSON string with the head-to-head history.
     """
     try:
         resolve_team(team_a)
@@ -69,6 +79,13 @@ def get_polymarket_odds(home_team: str, away_team: str, match_date: str = "") ->
     home_team and away_team are the two sides (order does not matter for lookup).
     match_date is an optional ISO date (YYYY-MM-DD) to disambiguate fixtures.
     Returns implied win/draw/away probabilities, raw market prices, volume, and a URL.
+
+    Args:
+        home_team: The name of the home team.
+        away_team: The name of the away team.
+        match_date: The date of the match (optional).
+    Returns:
+        A JSON string with the odds.
     """
     settings = get_settings()
     if not settings.polymarket_enabled:
@@ -87,6 +104,9 @@ def list_world_cup_fixtures() -> str:
 
     Only use this to show the calendar. To predict/pick results, use predict_all_fixtures
     or predict_match_result instead.
+
+    Returns:
+        A JSON string with the fixtures.
     """
     settings = get_settings()
     if not settings.polymarket_enabled:
@@ -111,6 +131,14 @@ def predict_match_result(
     Picks the scoreline that maximizes expected points under the contest rules, using a
     statistical model (FIFA rank, form, H2H) blended with live Polymarket odds when available.
     The recommended_bet is the score to submit.
+
+    Args:
+        home_team: The name of the home team.
+        away_team: The name of the away team.
+        match_date: The date of the match (optional).
+        stage: The stage of the match (optional).
+    Returns:
+        A JSON string with the prediction.
     """
     settings = get_settings()
     stage = stage if stage in ("group", "knockout") else "group"
@@ -241,6 +269,13 @@ def predict_all_fixtures(stage: str = "group", match_date: str = "", limit: int 
     stage is 'group' or 'knockout'. match_date filters to one ISO date (YYYY-MM-DD) — pass it
     whenever the user mentions a specific day. limit caps results (default 30). Uses the
     90-minute result only (draws allowed in knockout).
+
+    Args:
+        stage: The stage of the match (optional).
+        match_date: The date of the match (optional).
+        limit: The limit of the matches (optional).
+    Returns:
+        A JSON string with the predictions.
     """
     settings = get_settings()
     stage = stage if stage in ("group", "knockout") else "group"
@@ -308,6 +343,16 @@ def record_match_result(
 
     Stores the actual score so it becomes context for future predictions and scores the
     points earned vs the saved prediction. home_team is the side that played at home.
+
+    Args:
+        home_team: The name of the home team.
+        away_team: The name of the away team.
+        home_goals: The number of goals scored by the home team.
+        away_goals: The number of goals scored by the away team.
+        match_date: The date of the match (optional).
+        stage: The stage of the match (optional).
+    Returns:
+        A JSON string with the result.
     """
     stage = stage if stage in ("group", "knockout") else "group"
     settings = get_settings()
@@ -339,6 +384,11 @@ def get_team_recent_results(team_name: str) -> str:
     """Show a team's actual results so far in this World Cup (most recent first).
 
     Use this for context before predicting a team's next match.
+
+    Args:
+        team_name: The name of the team to get the recent results.
+    Returns:
+        A JSON string with the recent results.
     """
     results = store.get_team_results(_canonical(team_name))
     return json.dumps(

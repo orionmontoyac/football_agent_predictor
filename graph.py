@@ -15,11 +15,6 @@ class FootballAgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
-def build_model(settings: Settings | None = None) -> ChatOllama:
-    settings = settings or get_settings()
-    return OllamaModelBuilder(settings).build(tools=TOOLS)
-
-
 def build_graph(
     settings: Settings | None = None,
     *,
@@ -27,13 +22,16 @@ def build_graph(
 ):
     """Compile the football prediction LangGraph agent."""
     settings = settings or get_settings()
-    model = model or build_model(settings)
+    # Build the model
+    model = OllamaModelBuilder(settings).build(tools=TOOLS)
 
+    # Define the agent node
     def agent_node(state: FootballAgentState) -> FootballAgentState:
         system = SystemMessage(content=settings.agent_system_prompt)
         response = model.invoke([system, *state["messages"]])
         return {"messages": [response]}
 
+    # Define the route node to route the messages to the tools or the end node
     def route(state: FootballAgentState) -> Literal["tools", "end"]:
         last = state["messages"][-1]
         if getattr(last, "tool_calls", None):
@@ -44,10 +42,13 @@ def build_graph(
     graph.add_node("agent", agent_node)
     graph.add_node("tools", ToolNode(TOOLS))
     graph.set_entry_point("agent")
+    # Add the conditional edges to route the messages to the tools or the end node
     graph.add_conditional_edges(
         "agent",
         route,
         {"tools": "tools", "end": END},
     )
+    # Add the edge to the tools node to the agent node (return to the agent node) this is needed to complete the loop
     graph.add_edge("tools", "agent")
+    # Compile the graph
     return graph.compile()

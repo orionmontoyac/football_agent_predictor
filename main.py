@@ -152,10 +152,16 @@ def print_stream(stream) -> None:
 
 
 def run_query(query: str, *, stream: bool = True) -> None:
+    """ This function get the settings, build the graph, and run the query"""
+
     settings = get_settings()
+    # Build the graph
     app = build_graph(settings)
+    # Create the input state
     input_state = {"messages": [HumanMessage(content=query)]}
+    # Get the config
     config = settings.langgraph_invoke_config()
+
 
     if stream:
         print_stream(
@@ -166,6 +172,7 @@ def run_query(query: str, *, stream: bool = True) -> None:
             )
         )
     else:
+        # Invoke the graph and print the result
         result = app.invoke(input_state, config=config)
         print_terminal(
             result["messages"][-1], _extract_predictions(result["messages"])
@@ -182,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         default="What will be the result of Mexico vs South Africa?",
         help='Match question, e.g. "What will be the result of Mexico vs South Africa?"',
     )
+    # If the user wants to print only the final answer instead of streaming node updates.
+    # node update are useful for debugging and development, but not for the end user.
     parser.add_argument(
         "--no-stream",
         action="store_true",
@@ -198,4 +207,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Since the agent is a CLI, we use SystemExit to exit the program with a status code.
     raise SystemExit(main())
