@@ -122,7 +122,7 @@ def list_world_cup_fixtures() -> str:
 def predict_match_result(
     home_team: str, away_team: str, match_date: str = "", stage: str = "group"
 ) -> str:
-    """Predict the points-maximizing scoreline for a football match.
+    """Predict the points-maximizing scoreline for a football match (read-only).
 
     home_team is the side playing at home (first name in 'X vs Y' queries).
     away_team is the visiting side. match_date is an optional ISO date (YYYY-MM-DD).
@@ -181,33 +181,29 @@ def predict_match_result(
         else "Draw"
     )
     result["recommended_bet"] = {
+        "home_goals": optimal["home_goals"],
+        "away_goals": optimal["away_goals"],
         "score": optimal["predicted_score"],
         "winner": winner,
         "stage": stage,
         "expected_points": optimal["expected_points"][stage],
         "max_points": optimal["max_points"][stage],
         "result_probabilities": optimal["result_probabilities"],
+        "source": "model+market" if "polymarket" in result else "model",
     }
+    if slug:
+        result["slug"] = slug
+    if event_date:
+        result["event_date"] = event_date
     if home_recent or away_recent:
         result["used_recent_results"] = {
             model["home_team"]: home_recent,
             model["away_team"]: away_recent,
         }
 
-    store.save_prediction(
-        model["home_team"],
-        model["away_team"],
-        optimal["home_goals"],
-        optimal["away_goals"],
-        stage=stage,
-        event_date=event_date,
-        slug=slug,
-        expected_points=optimal["expected_points"][stage],
-        source="model+market" if "polymarket" in result else "model",
-    )
     result["note"] = (
-        "recommended_bet maximizes expected points and was saved. It blends the model "
-        "(adjusted for past tournament results) with live market odds."
+        "recommended_bet maximizes expected points (read-only). Use save_match_prediction "
+        "to persist picks. Blends the model with live market odds when available."
     )
     return json.dumps(result, indent=2)
 
@@ -265,7 +261,7 @@ def _recommended_bet(
 def predict_all_fixtures(stage: str = "group", match_date: str = "", limit: int = 30) -> str:
     """Make PICKS/PREDICTIONS for many World Cup matches at once (e.g. 'all matches', 'today's games').
 
-    This is the tool to fill the polla. Returns the points-maximizing score for each fixture.
+    Read-only: returns the points-maximizing score per fixture. Use save_match_prediction to persist.
     stage is 'group' or 'knockout'. match_date filters to one ISO date (YYYY-MM-DD) — pass it
     whenever the user mentions a specific day. limit caps results (default 30). Uses the
     90-minute result only (draws allowed in knockout).
@@ -294,23 +290,15 @@ def predict_all_fixtures(stage: str = "group", match_date: str = "", limit: int 
             bet = _recommended_bet(odds.home_team, odds.away_team, market, settings, stage)
         except TeamNotFoundError:
             continue
-        store.save_prediction(
-            _canonical(odds.home_team),
-            _canonical(odds.away_team),
-            bet["home_goals"],
-            bet["away_goals"],
-            stage=stage,
-            event_date=odds.event_date,
-            slug=odds.slug,
-            expected_points=bet["expected_points"],
-            source=bet["source"],
-        )
-        bet["match"] = odds.title
-        bet["event_date"] = odds.event_date
         picks.append(
             {
                 "match": odds.title,
+                "home_team": _canonical(odds.home_team),
+                "away_team": _canonical(odds.away_team),
+                "home_goals": bet["home_goals"],
+                "away_goals": bet["away_goals"],
                 "event_date": odds.event_date,
+                "slug": odds.slug,
                 "score": bet["score"],
                 "winner": bet["winner"],
                 "expected_points": bet["expected_points"],
@@ -328,6 +316,52 @@ def predict_all_fixtures(stage: str = "group", match_date: str = "", limit: int 
         },
         indent=2,
     )
+
+
+@tool
+def save_match_prediction(
+    home_team: str,
+    away_team: str,
+    home_goals: int,
+    away_goals: int,
+    match_date: str = "",
+    stage: str = "group",
+    slug: str = "",
+    expected_points: float = 0.0,
+    source: str = "",
+) -> str:
+    """Save a prediction pick for the polla (does not compute scores).
+
+    Call after predict_match_result or predict_all_fixtures when the user wants picks stored.
+    Pass home_goals, away_goals, and metadata from the prediction output (slug, event_date,
+    expected_points, source help match and score the entry later).
+
+    Args:
+        home_team: The name of the home team.
+        away_team: The name of the away team.
+        home_goals: Predicted home goals.
+        away_goals: Predicted away goals.
+        match_date: ISO date YYYY-MM-DD (optional).
+        stage: 'group' or 'knockout'.
+        slug: Polymarket fixture slug from prediction output (optional).
+        expected_points: Expected points from prediction output (optional).
+        source: 'model', 'market', or 'model+market' from prediction output (optional).
+    Returns:
+        A JSON string with the saved record.
+    """
+    stage = stage if stage in ("group", "knockout") else "group"
+    record = store.save_prediction(
+        _canonical(home_team),
+        _canonical(away_team),
+        int(home_goals),
+        int(away_goals),
+        stage=stage,
+        event_date=match_date or None,
+        slug=slug or None,
+        expected_points=expected_points or None,
+        source=source or None,
+    )
+    return json.dumps(record, indent=2, ensure_ascii=False)
 
 
 @tool
@@ -417,6 +451,7 @@ TOOLS: list[BaseTool] = [
     list_world_cup_fixtures,
     predict_match_result,
     predict_all_fixtures,
+    save_match_prediction,
     record_match_result,
     get_team_recent_results,
     get_points_summary,

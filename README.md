@@ -60,7 +60,7 @@ Because the winner/draw is worth half the points, the agent prioritizes getting 
 2. **Market** (`polymarket.py`): fetches the fixture's full-time "moneyline" market from the public Polymarket Gamma API and normalizes the cent prices into implied home/draw/away probabilities (overround removed).
 3. **Blend**: model and market probabilities are mixed (`POLYMARKET_MARKET_WEIGHT`, default `0.6` toward the market). If a team isn't in the local DB, xG is inferred from the market odds alone.
 4. **Optimize** (`scoring.py`): goals are modeled as Poisson variables, the joint scoreline distribution is reweighted to match the blended 1X2 probabilities, and the scoreline with the **maximum expected points** is selected. (Knockout weights are exactly 2× group weights, so the optimal score is the same for both stages — only the magnitude differs.)
-5. **Persist** (`store.py`): the prediction is saved automatically to `data/world_cup.json`.
+5. **Persist** (`save_match_prediction` → `store.py`): when the agent should lock in picks, they are saved to `data/world_cup.json`.
 
 ---
 
@@ -168,8 +168,9 @@ Colors auto-enable on a TTY. Override with environment variables:
 
 | Tool | Purpose |
 |------|---------|
-| `predict_match_result` | Points-maximizing score for one fixture (model + market) |
-| `predict_all_fixtures` | Picks for many fixtures at once (fill the whole pool) |
+| `predict_match_result` | Points-maximizing score for one fixture (read-only) |
+| `predict_all_fixtures` | Picks for many fixtures at once (read-only) |
+| `save_match_prediction` | Persist a pick to the polla store |
 | `record_match_result` | Save a real 90-minute result; auto-scores your prediction |
 | `get_team_recent_results` | A team's actual results so far this tournament |
 | `get_points_summary` | Total points, exact scores, winners correct |
