@@ -54,6 +54,12 @@ def stat(label: str, value: str, color: str = "cyan") -> str:
     return f"{bullet} {style(f'{label}:', 'bold', color)} {value}"
 
 
+def step(text: str, kind: str = "run") -> str:
+    """A dim progress line shown while the agent streams (e.g. tool calls)."""
+    icon = style("→", "cyan") if kind == "run" else style("✓", "green")
+    return f"{icon} {style(text, 'dim')}"
+
+
 def banner(home: str, away: str, score: str) -> list[str]:
     home, away, score = home.strip(), away.strip(), str(score).strip()
     plain = f"{home}  {score}  {away}"

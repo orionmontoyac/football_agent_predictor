@@ -134,6 +134,13 @@ def print_terminal(message, predictions=None) -> None:
         print(terminal.render(text, skip_banner=bool(predictions)))
 
 
+def _format_args(args: dict) -> str:
+    if not isinstance(args, dict):
+        return ""
+    parts = [f"{k}={v!r}" for k, v in args.items() if v not in (None, "")]
+    return ", ".join(parts)
+
+
 def print_stream(stream) -> None:
     tool_messages: list = []
     for step in stream:
@@ -143,12 +150,16 @@ def print_stream(stream) -> None:
             message = update["messages"][-1]
             if node_name == "tools":
                 tool_messages.append(message)
-            elif (
-                node_name == "agent"
-                and isinstance(message, AIMessage)
-                and not getattr(message, "tool_calls", None)
-            ):
-                print_terminal(message, _extract_predictions(tool_messages))
+                name = getattr(message, "name", "tool")
+                print(terminal.step(f"{name} done", "ok"))
+            elif node_name == "agent" and isinstance(message, AIMessage):
+                tool_calls = getattr(message, "tool_calls", None)
+                if tool_calls:
+                    for call in tool_calls:
+                        label = f"{call.get('name', 'tool')}({_format_args(call.get('args', {}))})"
+                        print(terminal.step(f"calling {label}", "run"))
+                else:
+                    print_terminal(message, _extract_predictions(tool_messages))
 
 
 def run_query(query: str, *, stream: bool = True) -> None:
