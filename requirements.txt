@@ -1,6 +1,7 @@
 langchain-core
 langchain-ollama
 langgraph
+pydantic
 pydantic-settings
 python-dotenv
 httpx

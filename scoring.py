@@ -17,19 +17,22 @@ prioritizes the result (worth half the points) and then the most likely exact go
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, computed_field
 
 Stage = Literal["group", "knockout"]
 
 
-@dataclass(frozen=True)
-class PointRules:
+class PointRules(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     winner: int
     home_goals: int
     away_goals: int
     goal_difference: int
 
+    @computed_field
     @property
     def max_points(self) -> int:
         return self.winner + self.home_goals + self.away_goals + self.goal_difference

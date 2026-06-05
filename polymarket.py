@@ -10,11 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from config import Settings, get_settings
 from logging_config import get_logger, log_event
@@ -28,8 +28,9 @@ class PolymarketError(RuntimeError):
     """Raised when Polymarket data cannot be fetched or parsed."""
 
 
-@dataclass(frozen=True)
-class MatchOdds:
+class MatchOdds(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     slug: str
     title: str
     home_team: str
@@ -44,10 +45,11 @@ class MatchOdds:
     raw_prices: dict[str, float]
     volume_usd: float | None
     url: str
-    fetched_at: str = field(
+    fetched_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
 
+    @computed_field
     @property
     def implied_winner(self) -> str:
         best = max(
