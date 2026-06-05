@@ -77,6 +77,7 @@ Because the winner/draw is worth half the points, the agent prioritizes getting 
 | `polymarket.py` | Polymarket Gamma API client + odds parsing |
 | `scoring.py` | Point rules, Poisson model, expected-points optimizer |
 | `store.py` | JSON persistence of predictions and real results |
+| `logging_config.py` | Loguru bootstrap + key=value event helper |
 | `terminal.py` | Dependency-free ANSI colors and score banners |
 
 ---
@@ -90,7 +91,7 @@ Because the winner/draw is worth half the points, the agent prioritizes getting 
 ollama pull granite4.1:3b
 ```
 
-- Python dependencies (see `requirements.txt`): `langchain-core`, `langchain-ollama`, `langgraph`, `pydantic-settings`, `python-dotenv`, `httpx`.
+- Python dependencies (see `requirements.txt`): `langchain-core`, `langchain-ollama`, `langgraph`, `pydantic-settings`, `python-dotenv`, `httpx`, `loguru`.
 
 ---
 
@@ -154,6 +155,7 @@ python main.py "How many points do I have?"
 ### Flags
 
 - `--no-stream` — print only the final answer (hides intermediate node updates).
+- `--verbose` — enable `DEBUG` logging for this run (overrides `LOG_LEVEL`).
 
 ### Color control
 
@@ -196,9 +198,42 @@ All settings are environment-driven via `config.py` (`Settings`) and an optional
 | `LANGGRAPH_RECURSION_LIMIT` | `25` | Max graph steps per run |
 | `LANGGRAPH_STREAM_MODE` | `updates` | LangGraph stream mode |
 | `PREDICTIONS_FILE` | `data/world_cup.json` | Where predictions/results are stored |
-| `LOG_LEVEL` | `INFO` | Logging level |
+| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) |
 
 See `.env.example` for a starting point.
+
+---
+
+## Observability
+
+Structured `event=... key=value` logs trace what the agent does: which tool ran with what
+arguments, whether Polymarket hit or fell back to the model, and how long each step took.
+Logging is powered by [loguru](https://github.com/Delgan/loguru), which prints colorized,
+level-tagged lines to **stderr** so they never mix with the styled CLI output on **stdout** —
+you can redirect them independently (for example `python main.py "..." 2> agent.log`).
+
+Set the level via `LOG_LEVEL` (or `--verbose` for a single `DEBUG` run):
+
+```bash
+LOG_LEVEL=DEBUG python main.py "What will be the result of Mexico vs South Africa?"
+```
+
+Sample output at `INFO` (colors stripped):
+
+```
+2026-06-04 12:00:01 INFO     football_agent.main event=run_start stream=True query_len=42
+2026-06-04 12:00:02 INFO     football_agent.graph event=agent_done duration_ms=820
+2026-06-04 12:00:02 INFO     football_agent.graph event=agent_tool_plan tools=predict_match_result
+2026-06-04 12:00:02 INFO     football_agent.graph event=tool_start tool=predict_match_result
+2026-06-04 12:00:03 INFO     football_agent.polymarket event=polymarket_http_done path=events duration_ms=210 status=ok
+2026-06-04 12:00:03 INFO     football_agent.polymarket event=polymarket_match_found home=Mexico away="South Africa" slug=...
+2026-06-04 12:00:03 INFO     football_agent.tools event=market_blend home=Mexico away="South Africa" source=model+market
+2026-06-04 12:00:03 INFO     football_agent.graph event=tool_done tool=predict_match_result duration_ms=1200 status=ok
+2026-06-04 12:00:05 INFO     football_agent.graph event=agent_final content_len=96
+2026-06-04 12:00:05 INFO     football_agent.main event=run_end duration_ms=4500
+```
+
+`DEBUG` adds per-call tool arguments, routing decisions, cache hits, and raw HTTP requests.
 
 ---
 

@@ -8,6 +8,7 @@ fixtures live under a single series; each event exposes three Yes/No markets
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ from typing import Any
 import httpx
 
 from config import Settings, get_settings
+from logging_config import get_logger, log_event
+
+logger = get_logger("polymarket")
 
 POLYMARKET_WORLD_CUP_URL = "https://polymarket.com/sports/world-cup"
 
@@ -192,14 +196,35 @@ class PolymarketClient:
 
     def _get(self, path: str, params: dict[str, Any]) -> Any:
         url = f"{self._settings.polymarket_base_url.rstrip('/')}/{path.lstrip('/')}"
+        log_event(logger, logging.DEBUG, "polymarket_http", path=path, params=params)
+        start = time.perf_counter()
         try:
             response = httpx.get(
                 url, params=params, timeout=self._settings.polymarket_timeout_seconds
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
         except httpx.HTTPError as exc:
+            duration_ms = round((time.perf_counter() - start) * 1000)
+            log_event(
+                logger,
+                logging.WARNING,
+                "polymarket_http_fail",
+                path=path,
+                duration_ms=duration_ms,
+                error=exc,
+            )
             raise PolymarketError(f"Polymarket request failed: {exc}") from exc
+        duration_ms = round((time.perf_counter() - start) * 1000)
+        log_event(
+            logger,
+            logging.INFO,
+            "polymarket_http_done",
+            path=path,
+            duration_ms=duration_ms,
+            status="ok",
+        )
+        return data
 
     def fetch_event_by_slug(self, slug: str) -> MatchOdds:
         data = self._get("events", {"slug": slug})
@@ -218,6 +243,12 @@ class PolymarketClient:
             and _fixtures_cache is not None
             and now - _fixtures_cache[0] < ttl
         ):
+            log_event(
+                logger,
+                logging.DEBUG,
+                "polymarket_cache_hit",
+                fixtures=len(_fixtures_cache[1]),
+            )
             return _fixtures_cache[1]
 
         events: list[dict[str, Any]] = []
@@ -241,6 +272,9 @@ class PolymarketClient:
             offset += limit
 
         _fixtures_cache = (now, events)
+        log_event(
+            logger, logging.INFO, "polymarket_cache_miss", fixtures=len(events)
+        )
         return events
 
     def all_match_odds(
@@ -304,13 +338,31 @@ class PolymarketClient:
             break
 
         if best is None:
+            log_event(
+                logger,
+                logging.WARNING,
+                "polymarket_match_miss",
+                home=home_team,
+                away=away_team,
+                match_date=match_date,
+            )
             raise PolymarketError(
                 f"No Polymarket World Cup fixture found for "
                 f"{home_team} vs {away_team}"
                 + (f" on {match_date}" if match_date else "")
                 + "."
             )
-        return _parse_event(best)
+        odds = _parse_event(best)
+        log_event(
+            logger,
+            logging.INFO,
+            "polymarket_match_found",
+            home=home_team,
+            away=away_team,
+            slug=odds.slug,
+            event_date=odds.event_date,
+        )
+        return odds
 
 
 def blend_probabilities(

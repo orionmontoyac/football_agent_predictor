@@ -24,7 +24,7 @@ class Settings(BaseSettings):
         description="Ollama API base URL. Defaults to http://localhost:11434 when unset.",
     )
     ollama_temperature: float | None = Field(
-        default=None,
+        default=0,
         ge=0.0,
         le=2.0,
         description="Sampling temperature passed to the model.",
@@ -127,7 +127,7 @@ class Settings(BaseSettings):
 
     # --- App ---
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
-        default="INFO",
+        default="DEBUG",
     )
 
     def langgraph_invoke_config(self) -> dict[str, Any]:

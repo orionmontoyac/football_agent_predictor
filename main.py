@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
+import time
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import terminal
 from config import get_settings
 from graph import build_graph
+from logging_config import configure_logging, get_logger, log_event
+
+logger = get_logger("main")
 
 
 def _pct(value) -> str:
@@ -173,21 +178,26 @@ def run_query(query: str, *, stream: bool = True) -> None:
     # Get the config
     config = settings.langgraph_invoke_config()
 
-
-    if stream:
-        print_stream(
-            app.stream(
-                input_state,
-                stream_mode=settings.langgraph_stream_mode,
-                config=config,
+    log_event(logger, logging.INFO, "run_start", stream=stream, query_len=len(query))
+    start = time.perf_counter()
+    try:
+        if stream:
+            print_stream(
+                app.stream(
+                    input_state,
+                    stream_mode=settings.langgraph_stream_mode,
+                    config=config,
+                )
             )
-        )
-    else:
-        # Invoke the graph and print the result
-        result = app.invoke(input_state, config=config)
-        print_terminal(
-            result["messages"][-1], _extract_predictions(result["messages"])
-        )
+        else:
+            # Invoke the graph and print the result
+            result = app.invoke(input_state, config=config)
+            print_terminal(
+                result["messages"][-1], _extract_predictions(result["messages"])
+            )
+    finally:
+        duration_ms = round((time.perf_counter() - start) * 1000)
+        log_event(logger, logging.INFO, "run_end", duration_ms=duration_ms)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -207,7 +217,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print only the final answer instead of streaming node updates.",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable DEBUG logging for this run (overrides LOG_LEVEL).",
+    )
     args = parser.parse_args(argv)
+
+    settings = get_settings()
+    configure_logging(settings, verbose=args.verbose)
 
     try:
         run_query(args.query, stream=not args.no_stream)

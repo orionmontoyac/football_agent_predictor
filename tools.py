@@ -1,4 +1,5 @@
 import json
+import logging
 
 from langchain_core.tools import BaseTool, tool
 
@@ -12,8 +13,11 @@ from football_data import (
     predict_match,
     resolve_team,
 )
+from logging_config import get_logger, log_event
 from polymarket import PolymarketClient, PolymarketError, blend_probabilities
 from scoring import infer_xg_from_market, optimize_scoreline
+
+logger = get_logger("tools")
 
 
 def _canonical(team_name: str) -> str:
@@ -169,8 +173,32 @@ def predict_match_result(
             )
             result["polymarket"] = market
             result["blended_probabilities"] = final_probs
+            log_event(
+                logger,
+                logging.INFO,
+                "market_blend",
+                home=home_team,
+                away=away_team,
+                source="model+market",
+            )
         except PolymarketError as exc:
             result["polymarket_error"] = str(exc)
+            log_event(
+                logger,
+                logging.INFO,
+                "market_fallback",
+                home=home_team,
+                away=away_team,
+                error=str(exc),
+            )
+    else:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "polymarket_disabled",
+            home=home_team,
+            away=away_team,
+        )
 
     optimal = optimize_scoreline(xg["home"], xg["away"], final_probs)
     winner = (
@@ -228,13 +256,36 @@ def _recommended_bet(
                 model["probabilities"], market_probs, settings.polymarket_market_weight
             )
             source = "model+market"
+            log_event(
+                logger,
+                logging.INFO,
+                "market_blend",
+                home=home_team,
+                away=away_team,
+                source=source,
+            )
         else:
             probs = model["probabilities"]
             source = "model"
+            log_event(
+                logger,
+                logging.INFO,
+                "market_model_only",
+                home=home_team,
+                away=away_team,
+            )
     except TeamNotFoundError:
         if not market_probs:
             raise
         xg = infer_xg_from_market(market_probs)
+        log_event(
+            logger,
+            logging.INFO,
+            "market_fallback",
+            home=home_team,
+            away=away_team,
+            source=source,
+        )
 
     optimal = optimize_scoreline(xg["home"], xg["away"], probs)
     winner = (
@@ -350,6 +401,15 @@ def save_match_prediction(
         A JSON string with the saved record.
     """
     stage = stage if stage in ("group", "knockout") else "group"
+    log_event(
+        logger,
+        logging.INFO,
+        "save_prediction",
+        home=_canonical(home_team),
+        away=_canonical(away_team),
+        score=f"{int(home_goals)}-{int(away_goals)}",
+        stage=stage,
+    )
     record = store.save_prediction(
         _canonical(home_team),
         _canonical(away_team),
@@ -390,6 +450,15 @@ def record_match_result(
     """
     stage = stage if stage in ("group", "knockout") else "group"
     settings = get_settings()
+    log_event(
+        logger,
+        logging.INFO,
+        "record_result",
+        home=_canonical(home_team),
+        away=_canonical(away_team),
+        score=f"{int(home_goals)}-{int(away_goals)}",
+        stage=stage,
+    )
     slug = None
     event_date = match_date or None
     if settings.polymarket_enabled:

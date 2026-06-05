@@ -4,3 +4,4 @@ langgraph
 pydantic-settings
 python-dotenv
 httpx
+loguru
